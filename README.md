@@ -1,7 +1,7 @@
 # AstrBot LLM 指令执行器插件
 
 让 LLM 能够代理执行 Bot 指令，实现自然语言到指令的转换。
-
+本插件务必**配合 [astrbot_plugin_command_query](https://github.com/TenmaGabriel0721/astrbot_plugin_command_query) 使用**
 ## 功能特性
 
 - 🎮 **指令代理执行**：LLM 可以通过 `execute_command` 工具执行 Bot 指令
@@ -12,7 +12,6 @@
 
 ## 设计理念
 
-本插件务必**配合 [astrbot_plugin_command_query](https://github.com/TenmaGabriel0721/astrbot_plugin_command_query) 使用**：
 
 - `astrbot_plugin_command_query` 负责：查询指令名（LLM 用 `search_command` 工具查找指令）
 - `astrbot_plugin_llm_executor` 负责：执行指令（LLM 用 `execute_command` 工具执行指令）
