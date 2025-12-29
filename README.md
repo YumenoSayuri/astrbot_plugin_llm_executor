@@ -12,7 +12,7 @@
 
 ## 设计理念
 
-本插件**配合 `astrbot_plugin_command_query` 使用**：
+本插件务必**配合 `astrbot_plugin_command_query` 使用**：
 
 - `astrbot_plugin_command_query` 负责：查询指令名（LLM 用 `search_command` 工具查找指令）
 - `astrbot_plugin_llm_executor` 负责：执行指令（LLM 用 `execute_command` 工具执行指令）
