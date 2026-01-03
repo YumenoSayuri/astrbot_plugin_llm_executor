@@ -1,4 +1,6 @@
-{"enabled": {"description": "是否启用LLM指令执行器",
+{
+    "enabled": {
+        "description": "是否启用LLM指令执行器",
         "type": "bool",
         "default": true,
         "hint": "启用后，LLM可以通过execute_command工具代理执行Bot指令"
@@ -26,5 +28,23 @@
         "type": "list",
         "default": [],
         "hint": "在此列表中的用户可以执行管理员指令，无需开启 allow_admin_commands"
+    },
+    "bot_user_id": {
+        "description": "Bot自己的用户ID",
+        "type": "string",
+        "default": "bot_self",
+        "hint": "当使用as_bot=true时，Bot会以此ID作为自己的身份执行指令。可以设置为Bot的QQ号或其他唯一标识"
+    },
+    "enable_forward": {
+        "description": "是否启用合并转发功能",
+        "type": "bool",
+        "default": true,
+        "hint": "启用后，当指令输出的文本超过阈值时，将自动使用合并转发形式发送"
+    },
+    "forward_threshold": {
+        "description": "合并转发的字数阈值",
+        "type": "int",
+        "default": 1500,
+        "hint": "当指令输出的文本字数超过此值时，将使用合并转发。建议值：1000-2000"
     }
 }

@@ -7,21 +7,45 @@ from astrbot.core.star.filter.command import CommandFilter
 from astrbot.core.star.filter.command_group import CommandGroupFilter
 from astrbot.core.star.filter.permission import PermissionTypeFilter
 from astrbot.core.star.star_handler import star_handlers_registry, StarHandlerMetadata
-from astrbot.core.message.components import At, Plain, Image, Reply
+from astrbot.core.message.components import At, Plain, Image, Reply, Node, Nodes
+
+
+class BotIdentityEventWrapper:
+    """
+    事件包装器，用于覆盖 get_sender_id() 方法返回Bot的ID
+    """
+    def __init__(self, original_event: AstrMessageEvent, bot_user_id: str):
+        self._original_event = original_event
+        self._bot_user_id = bot_user_id
+    
+    def get_sender_id(self):
+        """返回Bot的ID而不是原始发送者ID"""
+        return self._bot_user_id
+    
+    def __getattr__(self, name):
+        """其他所有属性和方法都委托给原始事件对象"""
+        return getattr(self._original_event, name)
+    
+    def __setattr__(self, name, value):
+        """设置属性"""
+        if name in ('_original_event', '_bot_user_id'):
+            object.__setattr__(self, name, value)
+        else:
+            setattr(self._original_event, name, value)
 
 
 @register(
     "astrbot_plugin_llm_executor",
     "珈百璃",
-    "让LLM代理执行Bot指令，配合command_query插件使用",
-    "1.0.0"
+    "让LLM代理执行Bot指令或以Bot自身执行，配合command_query插件使用",
+    "1.1.0"
 )
 class LLMExecutorPlugin(Star):
     """
-    AstrBot LLM 指令执行器插件 v1.0
+    AstrBot LLM 指令执行器插件 v1.1
     
     【核心功能】
-    让 LLM 能够代理执行普通插件指令，实现自然语言到指令的转换。
+    让 LLM 能够代理执行普通插件指令，或以 Bot 自身执行指令，实现自然语言到指令的转换。
     
     【设计理念】
     - 配合 astrbot_plugin_command_query 使用
@@ -49,13 +73,18 @@ class LLMExecutorPlugin(Star):
         self.blacklist: List[str] = self.config.get("blacklist", [])
         self.allow_admin_commands = self.config.get("allow_admin_commands", False)
         self.admin_users: List[str] = self.config.get("admin_users", [])
+        self.bot_user_id = self.config.get("bot_user_id", "bot_self")
+        self.enable_forward = self.config.get("enable_forward", True)
+        self.forward_threshold = self.config.get("forward_threshold", 1500)
         
-        logger.info(f"LLM指令执行器插件已加载 v1.0")
+        logger.info(f"LLM指令执行器插件已加载 v1.1")
         logger.info(f"  - 启用状态: {self.enabled}")
         logger.info(f"  - 白名单: {self.whitelist if self.whitelist else '无限制'}")
         logger.info(f"  - 黑名单: {self.blacklist if self.blacklist else '无'}")
         logger.info(f"  - 允许管理员指令: {self.allow_admin_commands}")
         logger.info(f"  - 管理员用户: {self.admin_users if self.admin_users else '无'}")
+        logger.info(f"  - Bot用户ID: {self.bot_user_id}")
+        logger.info(f"  - 合并转发: {'启用' if self.enable_forward else '禁用'} (阈值: {self.forward_threshold}字)")
 
     async def _initialize(self):
         """异步初始化，构建指令处理器缓存"""
@@ -376,8 +405,13 @@ class LLMExecutorPlugin(Star):
         
         【使用场景】
         - 用户说"帮我钓鱼" → execute_command(command="钓鱼")
+        - 用户说"你也去钓鱼吧" → execute_command(command="钓鱼", as_bot=true)
         - 用户说"禁言张三60秒" → execute_command(command="禁言", args="60", at_qq_list=["123456789"])
         - 用户说"设置群头像为这张图" → execute_command(command="设置群头像", reply_image_url="http://...")
+        
+        【身份模式】
+        - as_bot=false（默认）: 代理用户执行，使用用户的身份和账户
+        - as_bot=true: Bot自己执行，使用Bot自己的身份和账户（Bot也会有自己的游戏账户）
         
         【特殊参数支持】
         - at_qq_list: 当指令需要@目标用户时使用（如禁言、踢人等）
@@ -388,12 +422,14 @@ class LLMExecutorPlugin(Star):
         - 如果指令需要参数，在 args 中传入
         - 某些管理员指令可能无法执行
         - LLM 可以通过其他工具获取群友的QQ号和昵称
+        - 使用 as_bot=true 时，Bot会以自己的身份参与游戏（如钓鱼、签到等）
         
         Args:
             command(string): 要执行的指令名（不含前缀），如 "钓鱼"、"签到"、"背包"
             args(string): 指令参数，多个参数用空格分隔。可以使用 @0, @1 等占位符指定 at_qq_list 中对应用户的位置（可选）。例如 "@0 100" 表示第一个@用户后跟100
             at_qq_list(array[string]): 需要@的QQ号字符串列表（可选），如 ["123456789", "987654321"]
             reply_image_url(string): 需要引用的图片URL（可选）
+            as_bot(boolean): 是否以Bot自己的身份执行指令（可选，默认false）。true=Bot自己执行，false=代理用户执行
         
         Returns:
             JSON 格式的执行结果，包含 success、command、result 或 error 字段
@@ -402,6 +438,7 @@ class LLMExecutorPlugin(Star):
         args = kwargs.get('args', '').strip()
         at_qq_list = kwargs.get('at_qq_list', [])
         reply_image_url = kwargs.get('reply_image_url', '').strip()
+        as_bot = kwargs.get('as_bot', False)
         
         # 记录执行日志
         log_parts = [f"LLM请求执行指令: {command}"]
@@ -411,6 +448,10 @@ class LLMExecutorPlugin(Star):
             log_parts.append(f"@用户: {at_qq_list}")
         if reply_image_url:
             log_parts.append(f"引用图片: {reply_image_url}")
+        if as_bot:
+            log_parts.append(f"身份: Bot自己")
+        else:
+            log_parts.append(f"身份: 代理用户")
         logger.info(" | ".join(log_parts))
         
         # 参数检查
@@ -456,9 +497,20 @@ class LLMExecutorPlugin(Star):
         # 4. 执行处理器
         original_msg = event.message_str
         original_message_obj = getattr(event, 'message_obj', None)
+        original_event = None
         
         try:
             handler: StarHandlerMetadata = handler_info['handler']
+            
+            # 如果as_bot=true，使用包装器替换事件对象
+            if as_bot:
+                # 保存原始事件对象
+                original_event = event
+                original_sender_id = event.get_sender_id()
+                
+                # 创建包装器，覆盖 get_sender_id() 方法
+                event = BotIdentityEventWrapper(event, self.bot_user_id)
+                logger.debug(f"已创建Bot身份包装器，原始ID: {original_sender_id}, Bot ID: {self.bot_user_id}")
             
             # 修改 event.message_str 以包含指令和参数
             # 使用 / 作为标准前缀
@@ -492,17 +544,14 @@ class LLMExecutorPlugin(Star):
             # 执行并收集结果
             result_texts = []
             result_images = []
+            results_to_send = []  # 收集所有结果用于合并转发判断
+            
             try:
                 # 调用处理器的 handler 方法
                 # handler.handler 已经是绑定方法，不需要传入 plugin_instance
                 async for result in handler.handler(event):
                     if result is not None:
-                        # 将结果发送给用户
-                        try:
-                            await event.send(result)
-                            logger.debug(f"已发送指令结果给用户")
-                        except Exception as send_err:
-                            logger.warning(f"发送结果失败: {send_err}")
+                        results_to_send.append(result)
                         # 收集内容用于返回给 LLM
                         extracted = self._extract_content_from_result(result)
                         result_texts.extend(extracted["texts"])
@@ -512,18 +561,64 @@ class LLMExecutorPlugin(Star):
                 logger.debug(f"处理器调用方式调整: {e}")
                 result = await handler.handler(event)
                 if result is not None:
-                    # 将结果发送给用户
-                    try:
-                        await event.send(result)
-                        logger.debug(f"已发送指令结果给用户")
-                    except Exception as send_err:
-                        logger.warning(f"发送结果失败: {send_err}")
+                    results_to_send.append(result)
                     # 收集内容用于返回给 LLM
                     extracted = self._extract_content_from_result(result)
                     result_texts.extend(extracted["texts"])
                     result_images.extend(extracted["images"])
             
-            # 恢复原始消息
+            # 判断是否需要使用合并转发
+            total_text_length = sum(len(text) for text in result_texts)
+            use_forward = (
+                self.enable_forward
+                and total_text_length > self.forward_threshold
+                and event.get_platform_name() == "aiocqhttp"  # 只对 QQ 平台启用
+            )
+            
+            if use_forward:
+                # 使用合并转发发送
+                logger.info(f"文本长度 {total_text_length} 超过阈值 {self.forward_threshold}，使用合并转发")
+                try:
+                    # 将所有结果合并到一个 Node 中
+                    all_components = []
+                    for result in results_to_send:
+                        if hasattr(result, 'chain') and result.chain:
+                            all_components.extend(result.chain)
+                    
+                    if all_components:
+                        node = Node(
+                            uin=event.get_self_id(),
+                            name="AstrBot",
+                            content=all_components
+                        )
+                        from astrbot.core.message.message_event_result import MessageEventResult
+                        forward_result = MessageEventResult()
+                        forward_result.chain = [node]
+                        await event.send(forward_result)
+                        logger.debug(f"已使用合并转发发送指令结果")
+                except Exception as forward_err:
+                    logger.error(f"合并转发失败，使用普通方式发送: {forward_err}")
+                    # 失败则回退到普通发送
+                    for result in results_to_send:
+                        try:
+                            await event.send(result)
+                        except Exception as send_err:
+                            logger.warning(f"发送结果失败: {send_err}")
+            else:
+                # 普通发送
+                for result in results_to_send:
+                    try:
+                        await event.send(result)
+                        logger.debug(f"已发送指令结果给用户")
+                    except Exception as send_err:
+                        logger.warning(f"发送结果失败: {send_err}")
+            
+            # 恢复原始消息和事件对象
+            if as_bot and original_event is not None:
+                # 如果使用了包装器，恢复原始事件对象
+                event = original_event
+                logger.debug(f"已恢复原始事件对象")
+            
             event.message_str = original_msg
             if original_message_obj is not None:
                 event.message_obj = original_message_obj
@@ -549,14 +644,22 @@ class LLMExecutorPlugin(Star):
             if not result_texts and not result_images:
                 response["result"] = "指令执行完成（无输出内容）"
             
-            logger.info(f"指令执行成功: {command}, 文本: {len(result_texts)}, 图片: {len(result_images)}")
+            # 添加执行身份标识
+            if as_bot:
+                response["executed_as"] = "bot"
+            else:
+                response["executed_as"] = "user"
+            
+            logger.info(f"指令执行成功: {command} (身份: {'Bot' if as_bot else '用户'}), 文本: {len(result_texts)}, 图片: {len(result_images)}")
             return json.dumps(response, ensure_ascii=False)
             
         except Exception as e:
             logger.error(f"执行指令 {command} 时发生错误: {e}", exc_info=True)
             
-            # 尝试恢复原始消息
+            # 尝试恢复原始消息和事件对象
             try:
+                if as_bot and original_event is not None:
+                    event = original_event
                 event.message_str = original_msg
             except Exception:
                 pass
@@ -629,6 +732,43 @@ class LLMExecutorPlugin(Star):
             "plugins": plugins_dict
         }, ensure_ascii=False, indent=2)
 
+    @filter.command("测试bot身份")
+    async def test_bot_identity(self, event: AstrMessageEvent):
+        """测试Bot身份切换功能 - 使用包装器方法"""
+        original_id = event.get_sender_id()
+        test_id = "test_bot_12345"
+        
+        try:
+            # 使用包装器测试
+            wrapped_event = BotIdentityEventWrapper(event, test_id)
+            wrapped_id = wrapped_event.get_sender_id()
+            
+            # 测试包装器是否能正常访问其他属性
+            can_access_message_str = hasattr(wrapped_event, 'message_str')
+            can_access_send = hasattr(wrapped_event, 'send')
+            
+            result = f"""🔍 Bot身份测试结果（包装器方法）：
+原始ID: {original_id}
+测试ID: {test_id}
+包装器返回的ID: {wrapped_id}
+修改是否成功: {'✅ 是' if str(wrapped_id) == str(test_id) else '❌ 否'}
+
+包装器功能测试:
+- 可以访问 message_str: {'✅' if can_access_message_str else '❌'}
+- 可以访问 send 方法: {'✅' if can_access_send else '❌'}
+
+Bot配置的ID: {self.bot_user_id}
+
+💡 新方法说明：
+现在使用包装器来覆盖 get_sender_id() 方法，
+而不是直接修改事件对象的属性。
+这样可以确保无论事件对象内部如何实现，
+都能正确返回Bot的ID。
+"""
+            yield event.plain_result(result)
+        except Exception as e:
+            yield event.plain_result(f"❌ 测试失败: {e}\n{type(e).__name__}: {str(e)}")
+    
     @filter.command("刷新指令缓存", alias={"refresh_commands"})
     async def refresh_cache(self, event: AstrMessageEvent):
         """手动刷新指令处理器缓存"""
